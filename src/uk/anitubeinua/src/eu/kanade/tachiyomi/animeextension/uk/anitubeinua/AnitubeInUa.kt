@@ -9,8 +9,11 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.util.asJsoup
 import okhttp3.FormBody
+import okhttp3.Headers
 import okhttp3.Request
 import okhttp3.Response
+import org.json.JSONObject
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
@@ -23,6 +26,10 @@ class AnitubeInUa : ParsedAnimeHttpSource() {
     override val baseUrl = "https://anitube.in.ua"
     private val animeUrl = "$baseUrl/anime"
 
+    override fun headersBuilder(): Headers.Builder = super.headersBuilder()
+        .add("Referer", baseUrl)
+        .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+
     private val animeSelector = "article.story"
     private val nextPageSelector = "div.navigation span.navext a"
 
@@ -31,12 +38,7 @@ class AnitubeInUa : ParsedAnimeHttpSource() {
     // ===========================
 
     override fun popularAnimeRequest(page: Int): Request {
-        // AniTube uses /anime/page/N navigation for listing pages.
-        val url = if (page == 1) {
-            animeUrl
-        } else {
-            "$animeUrl/page/$page"
-        }
+        val url = if (page == 1) animeUrl else "$animeUrl/page/$page"
         return GET(url, headers)
     }
 
@@ -44,15 +46,12 @@ class AnitubeInUa : ParsedAnimeHttpSource() {
 
     override fun popularAnimeFromElement(element: Element): SAnime {
         val anime = SAnime.create()
-
-        // Main link to the anime details page.
         val link = element.selectFirst("div.storycla a, h2[itemprop=name] a")
             ?: element.selectFirst("a[href*='anitube.in.ua']")
             ?: throw Exception("Anime link not found")
 
         anime.setUrlWithoutDomain(link.attr("href"))
 
-        // Thumbnail from story card image.
         val imgSpan = element.selectFirst("span.storypostimg")
         val thumbCandidate = imgSpan?.attr("data-src").orEmpty().ifBlank {
             imgSpan?.attr("src").orEmpty()
@@ -62,21 +61,11 @@ class AnitubeInUa : ParsedAnimeHttpSource() {
             anime.thumbnail_url = if (thumbCandidate.startsWith("http")) {
                 thumbCandidate
             } else {
-                // AniTube paths are relative to the site root.
-                if (thumbCandidate.startsWith("/")) {
-                    "$baseUrl$thumbCandidate"
-                } else {
-                    "$baseUrl/$thumbCandidate"
-                }
+                "$baseUrl/${thumbCandidate.removePrefix("/")}"
             }
         }
 
-        // Title from the card; fallback to link text.
-        val title = element.selectFirst("span.storylink a")?.text()
-            ?: link.text()
-
-        anime.title = title
-
+        anime.title = element.selectFirst("span.storylink a")?.text() ?: link.text()
         return anime
     }
 
@@ -86,32 +75,17 @@ class AnitubeInUa : ParsedAnimeHttpSource() {
     // Latest
     // ===========================
 
-    override fun latestUpdatesRequest(page: Int): Request {
-        // Latest updates use the same listing with different sort on the site.
-        // If needed, you can add query parameters here.
-        return popularAnimeRequest(page)
-    }
-
+    override fun latestUpdatesRequest(page: Int): Request = popularAnimeRequest(page)
     override fun latestUpdatesSelector(): String = animeSelector
-
-    override fun latestUpdatesFromElement(element: Element): SAnime =
-        popularAnimeFromElement(element)
-
+    override fun latestUpdatesFromElement(element: Element): SAnime = popularAnimeFromElement(element)
     override fun latestUpdatesNextPageSelector(): String = nextPageSelector
 
     // ===========================
     // Search
     // ===========================
 
-    override fun searchAnimeRequest(
-        page: Int,
-        query: String,
-        filters: AnimeFilterList,
-    ): Request {
-        // AniTube uses DLE search at /index.php?do=search.
-        // result_from is 1-based index of the first result; 40 per page is a common default.
+    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
         val resultFrom = ((page - 1) * 40) + 1
-
         val body = FormBody.Builder()
             .add("do", "search")
             .add("subaction", "search")
@@ -119,16 +93,11 @@ class AnitubeInUa : ParsedAnimeHttpSource() {
             .add("result_from", resultFrom.toString())
             .add("story", query)
             .build()
-
-        val url = "$baseUrl/index.php?do=search"
-        return POST(url, headers, body)
+        return POST("$baseUrl/index.php?do=search", headers, body)
     }
 
     override fun searchAnimeSelector(): String = animeSelector
-
-    override fun searchAnimeFromElement(element: Element): SAnime =
-        popularAnimeFromElement(element)
-
+    override fun searchAnimeFromElement(element: Element): SAnime = popularAnimeFromElement(element)
     override fun searchAnimeNextPageSelector(): String = nextPageSelector
 
     // ===========================
@@ -137,66 +106,31 @@ class AnitubeInUa : ParsedAnimeHttpSource() {
 
     override fun animeDetailsParse(document: Document): SAnime {
         val anime = SAnime.create()
-
-        // Title: prefer schema.org meta, then visible title.
-        val title = document.selectFirst("meta[itemprop=name]")?.attr("content")
+        anime.title = document.selectFirst("meta[itemprop=name]")?.attr("content")
             ?: document.selectFirst("div.storyc h2[itemprop=name] a")?.text()
-            ?: document.selectFirst("h1")?.text()
-            ?: ""
+            ?: document.selectFirst("h1")?.text() ?: ""
 
-        anime.title = title
-
-        // Poster: reuse the story card image if present on the page.
         val imgSpan = document.selectFirst("div.storycla span.storypostimg")
-        val posterCandidate = imgSpan?.attr("data-src").orEmpty().ifBlank {
-            imgSpan?.attr("src").orEmpty()
-        }
-
+        val posterCandidate = imgSpan?.attr("data-src").orEmpty().ifBlank { imgSpan?.attr("src").orEmpty() }
         if (posterCandidate.isNotBlank()) {
             anime.thumbnail_url = if (posterCandidate.startsWith("http")) {
                 posterCandidate
             } else {
-                if (posterCandidate.startsWith("/")) {
-                    "$baseUrl$posterCandidate"
-                } else {
-                    "$baseUrl/$posterCandidate"
-                }
+                "$baseUrl/${posterCandidate.removePrefix("/")}"
             }
         }
 
-        // Description block.
-        anime.description = document.select("div.storyctext").text()
-
-        // Year + genres from info block links.
-        val infoLinks = document.select("div.storyinfa dt a")
+        anime.description = document.select("div.storyctext, div.storytext, div.full-text, div[itemprop=description]").text()
         val genres = mutableListOf<String>()
-        var year: String? = null
-
-        for (a in infoLinks) {
-            val href = a.attr("href")
-            when {
-                href.contains("xfsearch/year") -> {
-                    year = a.text()
-                }
-                // Treat other labeled links as genres.
-                else -> {
-                    val text = a.text().trim()
-                    if (text.isNotEmpty()) {
-                        genres += text
-                    }
-                }
+        document.select("div.storyinfa dt a").forEach { a ->
+            val text = a.text().trim()
+            if (a.attr("href").contains("xfsearch/year")) {
+                anime.description = "Рік: $text\n" + (anime.description ?: "")
+            } else if (text.isNotEmpty()) {
+                genres.add(text)
             }
         }
-
-        if (genres.isNotEmpty()) {
-            anime.genre = genres.joinToString(", ")
-        }
-
-        // SAnime does not have a 'year' property in this version of the library.
-        // If year is important, it could be appended to the description.
-        year?.let {
-            anime.description = "Рік: $it\n" + (anime.description ?: "")
-        }
+        if (genres.isNotEmpty()) anime.genre = genres.joinToString(", ")
 
         return anime
     }
@@ -206,80 +140,173 @@ class AnitubeInUa : ParsedAnimeHttpSource() {
     // ===========================
 
     override fun episodeListParse(response: Response): List<SEpisode> {
-        // NOTE: This is a minimal placeholder implementation.
-        // AniTube’s real episodes are managed by its player/JS; you should
-        // inspect the anime page to extract the per-episode playlist and
-        // replace this block with proper parsing.
+        val document = response.asJsoup()
+        val episodeList = mutableListOf<SEpisode>()
 
-        val doc = response.asJsoup()
+        // Try to find IDs for the AJAX request
+        val ajaxInfo = document.selectFirst("#playlists-ajax")
+        val newsId = ajaxInfo?.attr("data-news_id")
+            ?: document.selectFirst("input#post_id, input[name=news_id]")?.attr("value")
+            ?: document.location().substringAfterLast("/").substringBefore("-")
 
-        val episode = SEpisode.create().apply {
-            name = "Episode 1"
-            setUrlWithoutDomain(doc.location())
-            episode_number = 1F
+        val xfname = ajaxInfo?.attr("data-xfname") ?: "playlist"
+
+        var playlistContainer = document
+        if (newsId != null) {
+            val ajaxUrl = "$baseUrl/engine/ajax/playlists.php?news_id=$newsId&xfield=$xfname"
+            try {
+                val ajaxHeaders = headersBuilder()
+                    .add("X-Requested-With", "XMLHttpRequest")
+                    .build()
+                val ajaxResponse = client.newCall(GET(ajaxUrl, ajaxHeaders)).execute()
+                val responseBody = ajaxResponse.body.string()
+
+                if (responseBody.trim().startsWith("{")) {
+                    val jsonObject = JSONObject(responseBody)
+                    if (jsonObject.optBoolean("success", false)) {
+                        playlistContainer = Jsoup.parse(jsonObject.getString("response"))
+                    }
+                } else if (responseBody.contains("li") && responseBody.contains("data-file")) {
+                    playlistContainer = Jsoup.parse(responseBody)
+                }
+            } catch (e: Exception) { }
         }
 
-        return listOf(episode)
+        // Map all labels from tabs (Category, Team, Player)
+        val tabsMap = playlistContainer.select(".playlists-items li[data-id]").associate {
+            it.attr("data-id") to it.text().trim()
+        }
+
+        // Extract episodes
+        playlistContainer.select("li[data-file]").forEach { ep ->
+            val file = ep.attr("data-file")
+            if (file.isBlank() || file == "null") return@forEach
+
+            val videoUrl = when {
+                file.startsWith("//") -> "https:$file"
+                file.startsWith("/") -> "$baseUrl$file"
+                else -> file
+            }
+
+            val epName = ep.ownText().ifBlank { ep.text() }.trim()
+            val dataId = ep.attr("data-id")
+            val parts = dataId.split("_")
+
+            // Labels based on data-id parts (cat_team_player_ep)
+            val catId = parts.take(2).joinToString("_")
+            val teamId = parts.take(3).joinToString("_")
+            val playerId = parts.take(4).joinToString("_")
+
+            val catName = tabsMap[catId] ?: ""
+            val teamName = tabsMap[teamId] ?: ""
+            val playerName = tabsMap[playerId] ?: ""
+
+            val labelParts = mutableListOf<String>()
+            if (catName.isNotBlank() && catName != epName) labelParts.add(catName)
+            if (teamName.isNotBlank() && teamName != epName) labelParts.add(teamName)
+            if (playerName.isNotBlank() && !playerName.contains("Плеєр") && playerName != epName) labelParts.add(playerName)
+            // If playerName contains "Плеєр", we might still want it if it's the only differentiator
+            if (playerName.contains("Плеєр")) labelParts.add(playerName)
+
+            val label = labelParts.distinct().joinToString(" - ")
+
+            episodeList.add(
+                SEpisode.create().apply {
+                    name = if (label.isNotBlank()) "$epName ($label)" else epName
+                    url = videoUrl
+                    episode_number = epName.filter { it.isDigit() || it == '.' }.toFloatOrNull() ?: 1f
+                },
+            )
+        }
+
+        return episodeList.distinctBy { it.name + it.url }.reversed()
     }
 
-    override fun episodeListSelector(): String =
-        throw UnsupportedOperationException("Not used; episodeListParse is overridden")
-
-    override fun episodeFromElement(element: Element): SEpisode =
-        throw UnsupportedOperationException("Not used; episodeListParse is overridden")
+    override fun episodeListSelector(): String = throw UnsupportedOperationException()
+    override fun episodeFromElement(element: Element): SEpisode = throw UnsupportedOperationException()
 
     // ===========================
     // Video extraction
     // ===========================
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        // WARNING: This is intentionally naive and likely needs to be
-        // replaced with real player extraction for AniTube.
-        //
-        // Strategy to improve it:
-        // 1. Open an anime page in a browser.
-        // 2. Look for <iframe>, <video>, or JS variables that contain m3u8/mp4 URLs.
-        // 3. Reproduce that logic here (potentially with an extra request).
+        val url = episode.url
+        if (url.isBlank()) return emptyList()
 
-        val url = if (episode.url.startsWith("http")) {
-            episode.url
-        } else {
-            "$baseUrl${episode.url}"
+        if (url.contains(".m3u8")) {
+            return extractVideosFromM3u8(url, url)
         }
 
-        val doc = client.newCall(GET(url, headers)).execute().asJsoup()
-
-        // Try to grab the first obvious video-like URL.
-        val candidate = doc.selectFirst(
-            "source[src*='.m3u8'], source[src*='.mp4'], a[href*='.m3u8'], a[href*='.mp4']",
-        )?.attr("src") ?: return emptyList()
-
-        val videoUrl = if (candidate.startsWith("http")) {
-            candidate
-        } else {
-            if (candidate.startsWith("/")) {
-                "$baseUrl$candidate"
-            } else {
-                "$baseUrl/$candidate"
-            }
-        }
-
-        val video = Video(videoUrl, "Default", videoUrl)
-        return listOf(video)
+        return extractVideosFromUrl(url)
     }
 
-    override fun videoListSelector(): String =
-        throw UnsupportedOperationException("Not used; getVideoList is overridden")
+    private fun extractVideosFromUrl(url: String, referer: String = baseUrl): List<Video> {
+        val list = mutableListOf<Video>()
+        val requestHeaders = headersBuilder().set("Referer", referer).build()
 
-    override fun videoFromElement(element: Element): Video =
-        throw UnsupportedOperationException("Not used; getVideoList is overridden")
+        try {
+            val response = client.newCall(GET(url, requestHeaders)).execute()
+            val html = response.body.string()
 
-    override fun videoUrlParse(document: Document): String =
-        throw UnsupportedOperationException("Not used; getVideoList is overridden")
+            // Look for m3u8 sources in script or attributes
+            val m3u8Regex = """["'](https?:[^"']+\.m3u8[^"']*)["']""".toRegex()
+            m3u8Regex.findAll(html).forEach { match ->
+                val m3u8Url = match.groupValues[1].replace("\\/", "/")
+                list.addAll(extractVideosFromM3u8(m3u8Url, url))
+            }
 
-    // ===========================
-    // Filters
-    // ===========================
+            // Recursively search in iframes
+            if (list.isEmpty()) {
+                val doc = Jsoup.parse(html, url)
+                doc.select("iframe").forEach { iframe ->
+                    val iframeUrl = iframe.attr("abs:src")
+                    if (iframeUrl.isNotBlank() && iframeUrl != url) {
+                        list.addAll(extractVideosFromUrl(iframeUrl, url))
+                    }
+                }
+            }
+
+            // Direct mp4 fallback
+            if (list.isEmpty()) {
+                val mp4Regex = """["'](https?:[^"']+\.mp4[^"']*)["']""".toRegex()
+                mp4Regex.findAll(html).forEach { match ->
+                    val mp4Url = match.groupValues[1].replace("\\/", "/")
+                    list.add(Video(mp4Url, "Direct (mp4)", mp4Url, headers = requestHeaders))
+                }
+            }
+        } catch (e: Exception) { }
+
+        return list.distinctBy { it.url }
+    }
+
+    private fun extractVideosFromM3u8(m3u8Url: String, referer: String): List<Video> {
+        val videoHeaders = headersBuilder().set("Referer", referer).build()
+        return try {
+            val response = client.newCall(GET(m3u8Url, videoHeaders)).execute()
+            val masterPlaylist = response.body.string()
+            val list = mutableListOf<Video>()
+
+            if (masterPlaylist.contains("#EXT-X-STREAM-INF")) {
+                masterPlaylist.split("#EXT-X-STREAM-INF:").drop(1).forEach { line ->
+                    val quality = line.substringAfter("RESOLUTION=", "").substringAfter("x", "").substringBefore(",", "Default") + "p"
+                    var vUrl = line.substringAfter("\n").substringBefore("\n").trim()
+                    if (!vUrl.startsWith("http")) {
+                        vUrl = m3u8Url.substringBeforeLast("/") + "/" + vUrl
+                    }
+                    list.add(Video(vUrl, quality, vUrl, headers = videoHeaders))
+                }
+            } else if (masterPlaylist.contains("#EXTINF") || masterPlaylist.contains("#EXTM3U")) {
+                list.add(Video(m3u8Url, "Default", m3u8Url, headers = videoHeaders))
+            }
+            list
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    override fun videoListSelector(): String = throw UnsupportedOperationException()
+    override fun videoFromElement(element: Element): Video = throw UnsupportedOperationException()
+    override fun videoUrlParse(document: Document): String = throw UnsupportedOperationException()
 
     override fun getFilterList(): AnimeFilterList = AnimeFilterList()
 }
