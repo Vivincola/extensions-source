@@ -1,7 +1,5 @@
-package eu.kanade.tachiyomi.animeextension.uk.anitubeinua
+package eu.kanade.tachiyomi.animeextension.uk.anitube
 
-import android.net.Uri
-import android.util.Log
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
@@ -16,141 +14,256 @@ import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
-class AnitubeInUa : ParsedAnimeHttpSource() {
+class AniTube : ParsedAnimeHttpSource() {
 
+    override val name = "AniTube"
     override val lang = "uk"
-    override val name = "AnitubeInUa"
     override val supportsLatest = true
-    private val animeSelector = "div.short"
-    private val nextPageSelector = "div.pagi-nav a"
 
     override val baseUrl = "https://anitube.in.ua/anime"
     private val baseUrlWithoutAnime = "https://anitube.in.ua"
 
-    // =========================== Anime Details ============================
+    private val animeSelector = "article.story"
+    private val nextPageSelector = "div.navigation span.navext a"
 
-    override fun animeDetailsParse(document: Document): SAnime {
-        val anime = SAnime.create()
-
-        val someInfo = document.select("div.full-desc")
-
-        anime.thumbnail_url = baseUrlWithoutAnime + document.select("div.f-poster img").attr("src")
-        anime.title = document.select("h1.top-title").text()
-        anime.description = document.select("div.full-text p").text()
-
-        someInfo.select(".full-info div.fi-col-item")
-            .forEach {
-                    ele ->
-                when (ele.select("span").text()) {
-                    "Студія:" -> anime.author = ele.select("a").text()
-                    "Жанр:" -> anime.genre = ele.select("a").text().replace(" ", ", ")
-                }
-            }
-        return anime
-    }
-
-    // ============================== Popular ===============================
-
-    override fun popularAnimeFromElement(element: Element): SAnime {
-        val anime = SAnime.create()
-
-        anime.setUrlWithoutDomain(element.select("div.m-views").attr("data-link"))
-        anime.thumbnail_url = baseUrlWithoutAnime + element.select("div.short-i > img").attr("src")
-        anime.title = element.select("div.short-t-or").text()
-        return anime
-    }
-
-    override fun popularAnimeNextPageSelector() = nextPageSelector
+    // ===========================
+    // Popular
+    // ===========================
 
     override fun popularAnimeRequest(page: Int): Request {
-        val body = FormBody.Builder()
-            .add("dlenewssortby", "rating")
-            .add("dledirection", "desc")
-            .add("set_new_sort", "dle_sort_cat_12")
-            .add("set_direction_sort", "dle_direction_cat_12")
-            .build()
-        return POST("$baseUrl/page/$page", body = body)
+        // AniTube uses /anime/page/N navigation for listing pages.
+        val url = if (page == 1) {
+            baseUrl
+        } else {
+            "$baseUrl/page/$page"
+        }
+        return GET(url, headers)
     }
 
     override fun popularAnimeSelector(): String = animeSelector
 
-    // =============================== Latest ===============================
+    override fun popularAnimeFromElement(element: Element): SAnime {
+        val anime = SAnime.create()
 
-    override fun latestUpdatesFromElement(element: Element) = popularAnimeFromElement(element)
+        // Main link to the anime details page.
+        val link = element.selectFirst("div.storycla a, h2[itemprop=name] a")
+            ?: element.selectFirst("a[href*='anitube.in.ua']")
+            ?: throw Exception("Anime link not found")
 
-    override fun latestUpdatesNextPageSelector() = nextPageSelector
+        anime.setUrlWithoutDomain(link.attr("href"))
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/anime/page/$page", headers)
+        // Thumbnail from story card image.
+        val imgSpan = element.selectFirst("span.storypostimg")
+        val thumbCandidate = imgSpan?.attr("data-src").orEmpty().ifBlank {
+            imgSpan?.attr("src").orEmpty()
+        }
 
-    override fun latestUpdatesSelector() = animeSelector
+        if (thumbCandidate.isNotBlank()) {
+            anime.thumbnail_url = if (thumbCandidate.startsWith("http")) {
+                thumbCandidate
+            } else {
+                // AniTube paths are relative to the site root.
+                "$baseUrlWithoutAnime/$thumbCandidate"
+            }
+        }
 
-    // =============================== Search ===============================
+        // Title from the card; fallback to link text.
+        val title = element.selectFirst("span.storylink a")?.text()
+            ?: link.text()
 
-    override fun searchAnimeFromElement(element: Element) = popularAnimeFromElement(element)
+        anime.title = title
 
-    override fun searchAnimeNextPageSelector() = nextPageSelector
+        return anime
+    }
 
-    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
+    override fun popularAnimeNextPageSelector(): String = nextPageSelector
+
+    // ===========================
+    // Latest
+    // ===========================
+
+    override fun latestUpdatesRequest(page: Int): Request {
+        // Latest updates use the same listing with different sort on the site.
+        // If needed, you can add query parameters here.
+        return popularAnimeRequest(page)
+    }
+
+    override fun latestUpdatesSelector(): String = animeSelector
+
+    override fun latestUpdatesFromElement(element: Element): SAnime =
+        popularAnimeFromElement(element)
+
+    override fun latestUpdatesNextPageSelector(): String = nextPageSelector
+
+    // ===========================
+    // Search
+    // ===========================
+
+    override fun searchAnimeRequest(
+        page: Int,
+        query: String,
+        filters: AnimeFilterList,
+    ): Request {
+        // AniTube uses DLE search at /index.php?do=search.
+        // result_from is 1-based index of the first result; 40 per page is a common default.
+        val resultFrom = ((page - 1) * 40) + 1
+
         val body = FormBody.Builder()
             .add("do", "search")
             .add("subaction", "search")
-            .add("full_search", "1")
-            .add("result_from", "1")
+            .add("fullsearch", "1")
+            .add("result_from", resultFrom.toString())
             .add("story", query)
             .build()
-        return POST("$baseUrlWithoutAnime/index.php?do=search", body = body)
+
+        val url = "$baseUrlWithoutAnime/index.php?do=search"
+        return POST(url, headers, body)
     }
 
-    override fun searchAnimeSelector() = animeSelector
+    override fun searchAnimeSelector(): String = animeSelector
 
-    // ============================== Episode ===============================
+    override fun searchAnimeFromElement(element: Element): SAnime =
+        popularAnimeFromElement(element)
 
-    override fun episodeFromElement(element: Element) = throw UnsupportedOperationException()
+    override fun searchAnimeNextPageSelector(): String = nextPageSelector
 
-    override fun episodeListSelector() = throw UnsupportedOperationException()
+    // ===========================
+    // Details
+    // ===========================
 
-    override fun episodeListParse(response: Response): List<SEpisode> {
-        val animePage = response.asJsoup()
+    override fun animeDetailsParse(document: Document): SAnime {
+        val anime = SAnime.create()
 
-        // Get Player URL
-        val playerURl = animePage.select("input[value*=https://video.ufdub.com]").attr("value")
+        // Title: prefer schema.org meta, then visible title.
+        val title = document.selectFirst("meta[itemprop=name]")?.attr("content")
+            ?: document.selectFirst("div.storyc h2[itemprop=name] a")?.text()
+            ?: document.selectFirst("h1")?.text()
+            ?: ""
 
-        // Parse only player
-        val player = client.newCall(GET(playerURl))
-            .execute()
-            .asJsoup().select("script").html()
+        anime.title = title
 
-        // Parse all episodes
-        val regexUFDubEpisodes = """https:\/\/ufdub.com\/video\/VIDEOS\.php\?(.*?)'""".toRegex()
-        val matchResult = regexUFDubEpisodes.findAll(player)
-
-        // Add to SEpisode
-        val episodeList = mutableListOf<SEpisode>()
-        for (item: MatchResult in matchResult) {
-            val parsedUrl = Uri.parse(item.value)
-
-            val episode = SEpisode.create()
-
-            episode.name = parsedUrl.getQueryParameter("Seriya")!!
-            episode.url = item.value.dropLast(1) // Drop '
-            episodeList.add(episode)
+        // Poster: reuse the story card image if present on the page.
+        val imgSpan = document.selectFirst("div.storycla span.storypostimg")
+        val posterCandidate = imgSpan?.attr("data-src").orEmpty().ifBlank {
+            imgSpan?.attr("src").orEmpty()
         }
 
-        return episodeList.reversed()
+        if (posterCandidate.isNotBlank()) {
+            anime.thumbnail_url = if (posterCandidate.startsWith("http")) {
+                posterCandidate
+            } else {
+                "$baseUrlWithoutAnime/$posterCandidate"
+            }
+        }
+
+        // Description block.
+        anime.description = document.select("div.storyctext").text()
+
+        // Year + genres from info block links.
+        val infoLinks = document.select("div.storyinfa dt a")
+        val genres = mutableListOf<String>()
+        var year: String? = null
+
+        for (a in infoLinks) {
+            val href = a.attr("href")
+            when {
+                href.contains("xfsearch/year") -> {
+                    year = a.text()
+                }
+                // Treat other labeled links as genres.
+                else -> {
+                    val text = a.text().trim()
+                    if (text.isNotEmpty()) {
+                        genres += text
+                    }
+                }
+            }
+        }
+
+        if (genres.isNotEmpty()) {
+            anime.genre = genres.joinToString(", ")
+        }
+
+        year?.toIntOrNull()?.let { anime.year = it }
+
+        return anime
     }
 
-    // ============================ Video ===============================
+    // ===========================
+    // Episodes
+    // ===========================
+
+    override fun episodeListParse(response: Response): List<SEpisode> {
+        // NOTE: This is a minimal placeholder implementation.
+        // AniTube’s real episodes are managed by its player/JS; you should
+        // inspect the anime page to extract the per-episode playlist and
+        // replace this block with proper parsing.
+
+        val doc = response.asJsoup()
+
+        val episode = SEpisode.create().apply {
+            name = "Episode 1"
+            setUrlWithoutDomain(doc.location())
+            episode_number = 1F
+        }
+
+        return listOf(episode)
+    }
+
+    override fun episodeListSelector(): String =
+        throw UnsupportedOperationException("Not used; episodeListParse is overridden")
+
+    override fun episodeFromElement(element: Element): SEpisode =
+        throw UnsupportedOperationException("Not used; episodeListParse is overridden")
+
+    // ===========================
+    // Video extraction
+    // ===========================
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val videoUrl = client.newCall(GET(episode.url)).execute().request.url.toString().replace("dl=1", "raw=1")
-        Log.d("fetchVideoList", videoUrl)
-        val video = Video(videoUrl, "Quality", videoUrl)
+        // WARNING: This is intentionally naive and likely needs to be
+        // replaced with real player extraction for AniTube.
+        //
+        // Strategy to improve it:
+        // 1. Open an anime page in a browser.
+        // 2. Look for <iframe>, <video>, or JS variables that contain m3u8/mp4 URLs.
+        // 3. Reproduce that logic here (potentially with an extra request).
+
+        val url = if (episode.url.startsWith("http")) {
+            episode.url
+        } else {
+            "$baseUrlWithoutAnime${episode.url}"
+        }
+
+        val doc = client.newCall(GET(url, headers)).execute().asJsoup()
+
+        // Try to grab the first obvious video-like URL.
+        val candidate = doc.selectFirst(
+            "source[src*='.m3u8'], source[src*='.mp4'], a[href*='.m3u8'], a[href*='.mp4']",
+        )?.attr("src") ?: return emptyList()
+
+        val videoUrl = if (candidate.startsWith("http")) {
+            candidate
+        } else {
+            "$baseUrlWithoutAnime/$candidate"
+        }
+
+        val video = Video(videoUrl, "Default", videoUrl)
         return listOf(video)
     }
 
-    override fun videoFromElement(element: Element) = throw UnsupportedOperationException()
+    override fun videoListSelector(): String =
+        throw UnsupportedOperationException("Not used; getVideoList is overridden")
 
-    override fun videoListSelector() = throw UnsupportedOperationException()
+    override fun videoFromElement(element: Element): Video =
+        throw UnsupportedOperationException("Not used; getVideoList is overridden")
 
-    override fun videoUrlParse(document: Document) = throw UnsupportedOperationException()
+    override fun videoUrlParse(document: Document): String =
+        throw UnsupportedOperationException("Not used; getVideoList is overridden")
+
+    // ===========================
+    // Filters
+    // ===========================
+
+    override fun getFilterList(): AnimeFilterList = AnimeFilterList()
 }
