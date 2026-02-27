@@ -1,4 +1,4 @@
-package eu.kanade.tachiyomi.animeextension.uk.anitube
+package eu.kanade.tachiyomi.animeextension.uk.anitubeinua
 
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
@@ -14,14 +14,14 @@ import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
-class AniTube : ParsedAnimeHttpSource() {
+class AnitubeInUa : ParsedAnimeHttpSource() {
 
     override val name = "AniTube"
     override val lang = "uk"
     override val supportsLatest = true
 
-    override val baseUrl = "https://anitube.in.ua/anime"
-    private val baseUrlWithoutAnime = "https://anitube.in.ua"
+    override val baseUrl = "https://anitube.in.ua"
+    private val animeUrl = "$baseUrl/anime"
 
     private val animeSelector = "article.story"
     private val nextPageSelector = "div.navigation span.navext a"
@@ -33,9 +33,9 @@ class AniTube : ParsedAnimeHttpSource() {
     override fun popularAnimeRequest(page: Int): Request {
         // AniTube uses /anime/page/N navigation for listing pages.
         val url = if (page == 1) {
-            baseUrl
+            animeUrl
         } else {
-            "$baseUrl/page/$page"
+            "$animeUrl/page/$page"
         }
         return GET(url, headers)
     }
@@ -63,7 +63,11 @@ class AniTube : ParsedAnimeHttpSource() {
                 thumbCandidate
             } else {
                 // AniTube paths are relative to the site root.
-                "$baseUrlWithoutAnime/$thumbCandidate"
+                if (thumbCandidate.startsWith("/")) {
+                    "$baseUrl$thumbCandidate"
+                } else {
+                    "$baseUrl/$thumbCandidate"
+                }
             }
         }
 
@@ -116,7 +120,7 @@ class AniTube : ParsedAnimeHttpSource() {
             .add("story", query)
             .build()
 
-        val url = "$baseUrlWithoutAnime/index.php?do=search"
+        val url = "$baseUrl/index.php?do=search"
         return POST(url, headers, body)
     }
 
@@ -152,7 +156,11 @@ class AniTube : ParsedAnimeHttpSource() {
             anime.thumbnail_url = if (posterCandidate.startsWith("http")) {
                 posterCandidate
             } else {
-                "$baseUrlWithoutAnime/$posterCandidate"
+                if (posterCandidate.startsWith("/")) {
+                    "$baseUrl$posterCandidate"
+                } else {
+                    "$baseUrl/$posterCandidate"
+                }
             }
         }
 
@@ -184,7 +192,11 @@ class AniTube : ParsedAnimeHttpSource() {
             anime.genre = genres.joinToString(", ")
         }
 
-        year?.toIntOrNull()?.let { anime.year = it }
+        // SAnime does not have a 'year' property in this version of the library.
+        // If year is important, it could be appended to the description.
+        year?.let {
+            anime.description = "Рік: $it\n" + (anime.description ?: "")
+        }
 
         return anime
     }
@@ -232,7 +244,7 @@ class AniTube : ParsedAnimeHttpSource() {
         val url = if (episode.url.startsWith("http")) {
             episode.url
         } else {
-            "$baseUrlWithoutAnime${episode.url}"
+            "$baseUrl${episode.url}"
         }
 
         val doc = client.newCall(GET(url, headers)).execute().asJsoup()
@@ -245,7 +257,11 @@ class AniTube : ParsedAnimeHttpSource() {
         val videoUrl = if (candidate.startsWith("http")) {
             candidate
         } else {
-            "$baseUrlWithoutAnime/$candidate"
+            if (candidate.startsWith("/")) {
+                "$baseUrl$candidate"
+            } else {
+                "$baseUrl/$candidate"
+            }
         }
 
         val video = Video(videoUrl, "Default", videoUrl)
