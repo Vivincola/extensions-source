@@ -1,0 +1,8 @@
+ext {
+    extName = 'Anitube.in.ua'
+    extClass = '.AnitubeInUa'
+    extVersionCode = 1
+    isNsfw = false
+}
+
+apply from: "$rootDir/common.gradle"
